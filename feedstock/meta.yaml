@@ -7,6 +7,8 @@ recipes:
     object: "recipe:recipe_0"
   - id: test_full_depth
     object: "recipe:recipe_1"
+  - id: "CMIP6.CMIP.MOHC.UKESM1-0-LL.historical.r1i1p1f2.SImon.siitdconc.gn.v20200309"
+    object: "recipe:recipe_2"
 provenance:
   providers: #TODO: Ask in the cloud call...
     - name: "ESGF" 
