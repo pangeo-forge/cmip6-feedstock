@@ -256,7 +256,7 @@ def urls_from_instance_id(instance_id):
 inputs = {
     'CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.zos.gn.v20190429':{'target_chunks':{'time':360}},
     'CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.so.gn.v20190429':{'target_chunks':{'time':6}, 'subset_inputs':{'time':5}},
-    "CMIP6.CMIP.MOHC.UKESM1-0-LL.historical.r1i1p1f2.SImon.siitdconc.gn.v20200309": {'target_chunks':{'time':6}}
+    "CMIP6.CMIP.MOHC.UKESM1-0-LL.historical.r1i1p1f2.SImon.siitdconc.gn.v20200309": {'target_chunks':{'time':3}, 'subset_inputs':{'time':3}}
 }
 
 
