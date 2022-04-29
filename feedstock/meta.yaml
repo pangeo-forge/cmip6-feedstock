@@ -9,6 +9,10 @@ recipes:
     object: "recipe:recipe_1"
   - id: "CMIP6.CMIP.MOHC.UKESM1-0-LL.historical.r1i1p1f2.SImon.siitdconc.gn.v20200309"
     object: "recipe:recipe_2"
+  - id: "CMIP6.CMIP.NOAA-GFDL.GFDL-CM4.historical.r1i1p1f1.SImon.sithick.gn.v20180701"
+    object: "recipe:recipe_3"
+  - id: "CMIP6.CMIP.NOAA-GFDL.GFDL-CM4.historical.r1i1p1f1.SImon.siconc.gn.v20180701"
+    object: "recipe:recipe_4"
 provenance:
   providers: #TODO: Ask in the cloud call...
     - name: "ESGF" 
