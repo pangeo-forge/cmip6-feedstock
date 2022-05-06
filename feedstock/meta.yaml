@@ -18,7 +18,7 @@ maintainers:
     orcid: "0000-0001-8571-865X"
     github: jbusecke
   - name: "Charles Stern"
-    orchid: "0000-0002-4078-0852"
+    orcid: "0000-0002-4078-0852"
     github: cisaacstern
 bakery:
   id: "pangeo-ldeo-nsf-earthcube"
