@@ -270,12 +270,5 @@ def recipe_from_urls(urls, instance_kwargs):
     )
     return recipe
 
-# TODO: ultimately we want this to work with a dictionary (waiting for this feature in pangeo cloud)
-#recipes = {iid:recipe_from_urls(urls_from_instance_id(iid), kwargs) for iid,kwargs in inputs.items()}
 
-#but for now define them as explicit variables
-iid = 'CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.zos.gn.v20190429'
-recipe_0 = recipe_from_urls(urls_from_instance_id(iid), inputs[iid])
-
-iid = 'CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.so.gn.v20190429'
-recipe_1 = recipe_from_urls(urls_from_instance_id(iid), inputs[iid])
+recipes = {iid: recipe_from_urls(urls_from_instance_id(iid), kwargs) for iid, kwargs in inputs.items()}
