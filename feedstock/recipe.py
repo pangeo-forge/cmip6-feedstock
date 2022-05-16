@@ -348,7 +348,7 @@ def dynamic_kwarg_generation(
         Dictionary containing keyword arguments that can be passed to `XarrayZarrRecipe`
 
     """
-    print("====== Dynamically Getting Kwargs =======")
+    print(f"====== Generate kwargs for {iid} =======")
     # TODO, I query the API in multiple places. Need to refactor something robust (which might try different urls?)
 
     url = "https://esgf-node.llnl.gov/esg-search/search"
