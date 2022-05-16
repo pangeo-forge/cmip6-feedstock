@@ -434,8 +434,8 @@ def dynamic_kwarg_generation(
         len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
         for a in dates
     ]
-    print("Size per file: {filesizes}")
-    print("Inferred timesteps per file: {timesteps}")
+    print(f"Size per file: {filesizes}")
+    print(f"Inferred timesteps per file: {timesteps}")
     element_sizes = [size / n_t for size, n_t in zip(filesizes, timesteps)]
 
     target_chunks = {
