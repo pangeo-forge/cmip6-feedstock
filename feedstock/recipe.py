@@ -498,7 +498,6 @@ allowed_divisors = {
 ## Recipe Generation
 iids = [
     "CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.zos.gn.v20190429",
-    "CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.so.gn.v20190429",
 ]
 inputs = {iid: dynamic_kwarg_generation(iid) for iid in iids}
 
