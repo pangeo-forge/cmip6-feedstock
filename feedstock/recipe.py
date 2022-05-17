@@ -357,6 +357,10 @@ def dynamic_kwarg_generation(
     # TODO: the 'distrib' parameter does not work as expected for all datasets.
     # Need to investigate that on the ESGF side.
     # Could just iterate through nodes for now.
+    
+    # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
+    MAX_SUBSET_SIZE=500e6
+    DESIRED_CHUNKSIZE=200e6
 
     params = {
         "type": "File",
@@ -426,6 +430,7 @@ def dynamic_kwarg_generation(
     # otherwise maybe use `id` (harder to parse)
     dates = [a["title"].replace(".nc", "").split("_")[-1].split("-") for a in file_resp]
 
+
     # infer number of timesteps using pandas
     def format_date(str_date):
         return "-".join([str_date[0:4], str_date[4:]])
@@ -435,36 +440,34 @@ def dynamic_kwarg_generation(
         len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
         for a in dates
     ]
-    print(f"Size per file: {filesizes}")
+    print(f'Dates for each file: {dates}')
+    print(f"Size per file in MB: {[f/1e6 for f in filesizes]}")
     print(f"Inferred timesteps per file: {timesteps}")
     element_sizes = [size / n_t for size, n_t in zip(filesizes, timesteps)]
-
+    
+    # TODO: We need a completely new logic branch which checks if the total size (sum(filesizes)) is smaller than a desired chunk
     target_chunks = {
         "time": choose_chunksize(
             allowed_divisors[table_id],
-            200e6,
+            DESIRED_CHUNKSIZE,
             element_sizes,
             timesteps,
             include_last=False,
         )
     }
-
-    subset_chunks = choose_chunksize(
-        allowed_divisors[table_id],
-        500e6,
-        [max(element_sizes)],
-        [max(timesteps)],
-        include_last=True,
-    )
-    # print([es*subset_chunks/1e6 for es in element_sizes])
-    # convert chunksize into number of chunks
-    subset_input = int(max(timesteps) / subset_chunks)
-
-    # make sure that this actually divides all files clean
-    if not all(ts % subset_input == 0 for ts in timesteps):
-        warnings.warn(
-            "The dynamically inferred `subset_input` does not divide each file cleanly"
-        )
+    
+    
+    # dont even try subsetting if none of the files is too large
+    if max(filesizes)<=MAX_SUBSET_SIZE:
+        subset_input = 0
+    else:
+        ## Determine subset_input parameters given the following constraints
+        # - Needs to keep the subset size below MAX_SUBSET_SIZE
+        # - (Not currently implemented) Resulting subsets should be evenly dividable by target_chunks (except for the last file, that can be odd). This might ultimately not be required once we figure out the locking issues. I cannot fulfill this right now with the dataset structure where often the first and last files have different number of timesteps than the 'middle' ones. 
+        
+        smallest_divisor = int(max(filesizes)//MAX_SUBSET_SIZE+1)# need to subset at least with this to stay under required subset size
+        subset_input = smallest_divisor
+        
 
     dynamic_kwargs = {"target_chunks": target_chunks}
     if subset_input > 1:
@@ -479,10 +482,16 @@ def dynamic_kwarg_generation(
 ## global variables
 
 # For certain table_ids it is preferrable to have time chunks that are a multiple of e.g. 1 year for monthly data.
-monthly_divisors = [1, 3, 6, 12, 12 * 3] + list(range(12 * 5, 12 * 200, 12 * 5))
+monthly_divisors = sorted(
+    [1, 3, 6, 12, 12 * 3] + list(range(12 * 5, 12 * 200, 12 * 5)) + [684, 1026, 2052] 
+    # the last list accomodates some special cases for `DAMIP` files (which are often only one file, but with a very odd number of years (e.g.  171 years for hist-aer 🤷). 
+    #TODO: I might not want to allow this in the ocean and ice fields. Lets see
+)
+
 allowed_divisors = {
     "Omon": monthly_divisors,
     "SImon": monthly_divisors,
+    "Amon": monthly_divisors,
 }  # Add table_ids and allowed divisors as needed
 
 
