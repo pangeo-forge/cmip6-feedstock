@@ -291,13 +291,13 @@ def is_netcdf3(url:str) -> bool:
     """Simple check to determine the netcdf file version behind a url.
     Requires the server to support range requests"""
     #TODO: This had some issues. for now deactivate
-    # if not supports_range_request(url):
-    #     print('Server does not support range requests. Default to False')
-    #     return False
-    # else:
-    headers = {"Range": "bytes=0-2"}
-    resp = requests.get(url, headers=headers)
-    return 'CDF' in str(resp.content) 
+    if not supports_range_request(url):
+        print('Server does not support range requests. Default to False')
+        return False
+    else:
+        headers = {"Range": "bytes=0-2"}
+        resp = requests.get(url, headers=headers)
+        return 'CDF' in str(resp.content) 
 
 def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str, str]):
     # Check that all responses indeed have the same attributes
