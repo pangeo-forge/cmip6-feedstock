@@ -1,271 +1,213 @@
-############################# just copied from esfg.py (TODO: being able to import this, would be nice and clean) ############################################
-"""ESGF API Search Results to Pandas Dataframes
-"""
+# Refactored logic
+# Key assumptions: 
+# - We ever only request a single IID. Broader searches are implemented in the parsing module (To be commited)
+# - We start with an instance id, but will actually search for a dataset id with 'latest' query set to true. This means if an outdated iid is requested we will error out (TODO: Need to think about how to handle this)
+
+#TODO: Check multiple nodes with some sort of priority (naomi had done quite a bit with that)
+# node_pref = {
+#     "esgf-data1.llnl.gov": 0,
+#     "esgf-data2.llnl.gov": 0,
+#     "aims3.llnl.gov": 0,
+#     "esgdata.gfdl.noaa.gov": 10,
+#     "esgf-data.ucar.edu": 10,
+#     "dpesgf03.nccs.nasa.gov": 5,
+#     "crd-esgf-drc.ec.gc.ca": 6,
+#     "cmip.bcc.cma.cn": 10,
+#     "cmip.dess.tsinghua.edu.cn": 10,
+#     "cmip.fio.org.cn": 10,
+#     "dist.nmlab.snu.ac.kr": 10,
+#     "esg-cccr.tropmet.res.in": 10,
+#     "esg-dn1.nsc.liu.se": 10,
+#     "esg-dn2.nsc.liu.se": 10,
+#     "esg.camscma.cn": 10,
+#     "esg.lasg.ac.cn": 10,
+#     "esg1.umr-cnrm.fr": 10,
+#     "esgf-cnr.hpc.cineca.it": 10,
+#     "esgf-data2.diasjp.net": 10,
+#     "esgf-data3.ceda.ac.uk": 10,
+#     "esgf-data3.diasjp.net": 10,
+#     "esgf-nimscmip6.apcc21.org": 10,
+#     "esgf-node2.cmcc.it": 10,
+#     "esgf.bsc.es": 10,
+#     "esgf.dwd.de": 10,
+#     "esgf.ichec.ie": 10,
+#     "esgf.nci.org.au": 10,
+#     "esgf.rcec.sinica.edu.tw": 10,
+#     "esgf3.dkrz.de": 10,
+#     "noresg.nird.sigma2.no": 10,
+#     "polaris.pknu.ac.kr": 10,
+#     "vesg.ipsl.upmc.fr": 10,
+# }
+
+
 import requests
-import numpy
 import pandas as pd
-import warnings
-from typing import List, Dict
-
-# dummy comment
-# copied from Naomis code https://github.com/pangeo-data/pangeo-cmip6-cloud/blob/master/myconfig.py
-target_keys = [
-    "activity_id",
-    "institution_id",
-    "source_id",
-    "experiment_id",
-    "member_id",
-    "table_id",
-    "variable_id",
-    "grid_label",
-]
-
-target_format = "%(" + ")s/%(".join(target_keys) + ")s"
-
-
-node_pref = {
-    "esgf-data1.llnl.gov": 0,
-    "esgf-data2.llnl.gov": 0,
-    "aims3.llnl.gov": 0,
-    "esgdata.gfdl.noaa.gov": 10,
-    "esgf-data.ucar.edu": 10,
-    "dpesgf03.nccs.nasa.gov": 5,
-    "crd-esgf-drc.ec.gc.ca": 6,
-    "cmip.bcc.cma.cn": 10,
-    "cmip.dess.tsinghua.edu.cn": 10,
-    "cmip.fio.org.cn": 10,
-    "dist.nmlab.snu.ac.kr": 10,
-    "esg-cccr.tropmet.res.in": 10,
-    "esg-dn1.nsc.liu.se": 10,
-    "esg-dn2.nsc.liu.se": 10,
-    "esg.camscma.cn": 10,
-    "esg.lasg.ac.cn": 10,
-    "esg1.umr-cnrm.fr": 10,
-    "esgf-cnr.hpc.cineca.it": 10,
-    "esgf-data2.diasjp.net": 10,
-    "esgf-data3.ceda.ac.uk": 10,
-    "esgf-data3.diasjp.net": 10,
-    "esgf-nimscmip6.apcc21.org": 10,
-    "esgf-node2.cmcc.it": 10,
-    "esgf.bsc.es": 10,
-    "esgf.dwd.de": 10,
-    "esgf.ichec.ie": 10,
-    "esgf.nci.org.au": 10,
-    "esgf.rcec.sinica.edu.tw": 10,
-    "esgf3.dkrz.de": 10,
-    "noresg.nird.sigma2.no": 10,
-    "polaris.pknu.ac.kr": 10,
-    "vesg.ipsl.upmc.fr": 10,
-}
-
-
-# Author: Unknown
-# I got the original version from a word document published by ESGF
-# https://docs.google.com/document/d/1pxz1Kd3JHfFp8vR2JCVBfApbsHmbUQQstifhGNdc6U0/edit?usp=sharing
-# API AT:
-# https://github.com/ESGF/esgf.github.io/wiki/ESGF_Search_REST_API#results-pagination
-
-
-def esgf_search(
-    search,
-    server="https://esgf-node.llnl.gov/esg-search/search",
-    files_type="HTTPServer",
-    local_node=True,
-    project="CMIP6",
-    page_size=500,
-    verbose=False,
-    format="application%2Fsolr%2Bjson",
-    toFilter=True,
-):
-
-    client = requests.session()
-    payload = search
-    payload["project"] = project
-    payload["type"] = "File"
-    if local_node:
-        payload["distrib"] = "false"
-
-    payload["format"] = format
-    payload["limit"] = 500
-
-    numFound = 10000
-    all_frames = []
-    offset = 0
-    while offset < numFound:
-        payload["offset"] = offset
-        url_keys = []
-        for k in payload:
-            url_keys += ["{}={}".format(k, payload[k])]
-
-        url = "{}/?{}".format(server, "&".join(url_keys))
-        print(url)
-        r = client.get(url)
-        r.raise_for_status()
-        resp = r.json()["response"]
-        numFound = int(resp["numFound"])
-
-        resp = resp["docs"]
-        offset += len(resp)
-        # print(offset,numFound,len(resp))
-        for d in resp:
-            dataset_id = d["dataset_id"]
-            dataset_size = d["size"]
-            for f in d["url"]:
-                sp = f.split("|")
-                if sp[-1] == files_type:
-                    url = sp[0]
-                    if sp[-1] == "OPENDAP":
-                        url = url.replace(".html", "")
-                    dataset_url = url
-            all_frames += [[dataset_id, dataset_url, dataset_size]]
-
-    ddict = {}
-    item = 0
-    for item, alist in enumerate(all_frames):
-        dataset_id = alist[0]
-        dataset_url = alist[1]
-        dataset_size = alist[2]
-        vlist = dataset_id.split("|")[0].split(".")[-9:]
-        vlist += [dataset_url.split("/")[-1]]
-        vlist += [dataset_size]
-        vlist += [dataset_url]
-        vlist += [dataset_id.split("|")[-1]]
-        ddict[item] = vlist
-        item += 1
-
-    dz = pd.DataFrame.from_dict(ddict, orient="index")
-    if len(dz) == 0:
-        print("empty search response")
-        return dz
-
-    dz = dz.rename(
-        columns={
-            0: "activity_id",
-            1: "institution_id",
-            2: "source_id",
-            3: "experiment_id",
-            4: "member_id",
-            5: "table_id",
-            6: "variable_id",
-            7: "grid_label",
-            8: "version_id",
-            9: "ncfile",
-            10: "file_size",
-            11: "url",
-            12: "data_node",
-        }
-    )
-
-    dz["ds_dir"] = dz.apply(lambda row: target_format % row, axis=1)
-    dz["node_order"] = [node_pref[s] for s in dz.data_node]
-    dz["start"] = [s.split("_")[-1].split("-")[0] for s in dz.ncfile]
-    dz["stop"] = [s.split("_")[-1].split("-")[-1].split(".")[0] for s in dz.ncfile]
-
-    if toFilter:
-        # remove all 999 nodes
-        dz = dz[dz.node_order != 999]
-
-        # keep only best node
-        dz = dz.sort_values(by=["node_order"])
-        dz = dz.drop_duplicates(subset=["ds_dir", "ncfile", "version_id"], keep="first")
-
-        # keep only most recent version from best node
-        dz = dz.sort_values(by=["version_id"])
-        dz = dz.drop_duplicates(subset=["ds_dir", "ncfile"], keep="last")
-
-    return dz
-
-
-####################################################
+from typing import List, Dict, Tuple
 from pangeo_forge_recipes.patterns import pattern_from_file_sequence
 from pangeo_forge_recipes.recipes import XarrayZarrRecipe
 
-# from esgf import (
-#     esgf_search,
-# )  # We probably want to strip this out later, left as is for now.
-
-node_dict = {
-    "llnl": "https://esgf-node.llnl.gov/esg-search/search",
-    "ipsl": "https://esgf-node.ipsl.upmc.fr/esg-search/search",
-    "ceda": "https://esgf-index1.ceda.ac.uk/esg-search/search",
-    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
-}
-
-
-def urls_from_instance_id(instance_id):
-    # get facets from instance_id
-    facet_labels = (
-        "mip_era",
-        "activity_id",
-        "institution_id",
-        "source_id",
-        "experiment_id",
-        "member_id",
-        "table_id",
-        "variable_id",
-        "grid_label",
-        "version",
+def recipe_from_urls(urls, kwargs):
+    # parse kwargs for different steps of the recipe
+    pattern_kwargs = kwargs.get('pattern_kwargs', {})
+    recipe_kwargs = kwargs.get('recipe_kwargs', {})
+    
+    pattern = pattern_from_file_sequence(urls, "time", **pattern_kwargs)
+    recipe = XarrayZarrRecipe(
+        pattern, xarray_concat_kwargs={"join": "exact"}, **recipe_kwargs
     )
+    return recipe
 
-    facet_vals = instance_id.split(".")
-    if len(facet_vals) != 10:
-        raise ValueError(
-            "Please specify a query of the form {"
-            + ("}.{".join(facet_labels).upper())
-            + "}"
+def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
+    """Takes an instance id and returns urls and kwargs dict based on ESGF API request to the given `node`"""
+    params = {
+        "type": "File",
+        "retracted": "false",
+        "replica": "false",
+        "format": "application/solr+json",
+        # "fields": ["url", "size", "retracted", "table_id", "title","instance_id"], # TODO: why does this not work? Ill revisit when I am tuning performance, for now get all
+        "latest": "true",
+        "distrib": "true",
+        # "limit": 500, # TODO: Should this be less?
+    }
+    facets = facets_from_iid(iid)
+    params.update(facets)
+    # searching with version does not work. So what I will do here is delete the version, and later check if the version of the iid is equal to the files found, otherwise error out. TODO
+    del params['version']
+    
+    resp = requests.get(node, params)
+    
+    if not resp.status_code == 200:
+        raise RuntimeError(f'Request failed with {resp.status_code} for {iid}')
+        ## TODO: Implement more sophisticated error handling
+    
+    # TODO: Check header?
+    resp_data = resp.json()['response']['docs']
+    
+    if len(resp_data) == 0:
+        raise ValueError(f'No Files were found for {iid}')
+        
+        # Extract info
+    raw_urls,sizes,retracted, table_ids, titles = zip(*[(rd['url'],rd['size'], rd['retracted'], rd['table_id'],rd['title']) for rd in resp_data])
+        
+    # Check consistency with iid input
+    _check_response_facets_consistency(facets, resp_data)
+    # this takes care of checking that all table_ids are the same, so I can do this
+    table_id = table_ids[0][0]
+    
+    #pick http url
+    urls = [_parse_url_type(url[0]) for url in raw_urls]
+    
+    # Check retractions (this seems a bit redundant, but what the heck
+    if not all(r is False for r in retracted):
+        print(retracted)
+        raise ValueError(f"Query for {iid} contains retracted files")
+    
+    
+    # extract date range from filename
+    # TODO: Is there a more robust way to do this?
+    # otherwise maybe use `id` (harder to parse)
+    dates = [t.replace(".nc", "").split("_")[-1].split("-") for t in titles]
+
+
+    # infer number of timesteps using pandas
+    def format_date(str_date):
+        return "-".join([str_date[0:4], str_date[4:]])
+
+    # TODO: For non-monthly data, we have to make the freq input smarter
+    timesteps = [
+        len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
+        for a in dates
+    ]
+    print(f'Dates for each file: {dates}')
+    print(f"Size per file in MB: {[f/1e6 for f in sizes]}")
+    print(f"Inferred timesteps per file: {timesteps}")
+    element_sizes = [size / n_t for size, n_t in zip(sizes, timesteps)]
+    
+    ### Determine kwargs
+    print(f"====== Generate kwargs for {iid} =======")
+    # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
+    MAX_SUBSET_SIZE=500e6
+    DESIRED_CHUNKSIZE=200e6
+    # TODO: We need a completely new logic branch which checks if the total size (sum(filesizes)) is smaller than a desired chunk
+    target_chunks = {
+        "time": choose_chunksize(
+            allowed_divisors[table_id],
+            DESIRED_CHUNKSIZE,
+            element_sizes,
+            timesteps,
+            include_last=False,
         )
-
-    facets = dict(zip(facet_labels, facet_vals))
-
-    if facets["mip_era"] != "CMIP6":
-        raise ValueError("Only CMIP6 mip_era supported")
-
-    # version doesn't work here
-    keep_facets = (
-        "activity_id",
-        "institution_id",
-        "source_id",
-        "experiment_id",
-        "member_id",
-        "table_id",
-        "variable_id",
-        "grid_label",
+    }
+    
+    
+    # dont even try subsetting if none of the files is too large
+    if max(sizes)<=MAX_SUBSET_SIZE:
+        subset_input = 0
+    else:
+        ## Determine subset_input parameters given the following constraints
+        # - Needs to keep the subset size below MAX_SUBSET_SIZE
+        # - (Not currently implemented) Resulting subsets should be evenly dividable by target_chunks (except for the last file, that can be odd). This might ultimately not be required once we figure out the locking issues. I cannot fulfill this right now with the dataset structure where often the first and last files have different number of timesteps than the 'middle' ones. 
+        
+        smallest_divisor = int(max(sizes)//MAX_SUBSET_SIZE+1)# need to subset at least with this to stay under required subset size
+        subset_input = smallest_divisor
+    
+    recipe_kwargs = {"target_chunks": target_chunks}
+    if subset_input > 1:
+        recipe_kwargs["subset_inputs"] = {"time": subset_input}
+    
+    print(
+        f"Will result in max chunksize of {max(element_sizes)*target_chunks['time']/1e6}MB"
     )
-    search_facets = {f: facets[f] for f in keep_facets}
-
-    search_node = "llnl"
-    ESGF_site = node_dict[
-        search_node
-    ]  # TODO: We might have to be more clever here and search through different nodes. For later.
-
-    df = esgf_search(search_facets, server=ESGF_site)  # this modifies the dict inside?
-
-    # get list of urls
-    urls = df["url"].tolist()
-
+    
+    # Check for netcdf version
+        # Detect if file is netcdf3 or newer
+    print(urls)
+    pattern_kwargs = {}
+    if any(is_netcdf3(url) for url in urls):
+        pattern_kwargs['file_type']="netcdf3"
+    
+    
     # sort urls in decending time order (to be able to pass them directly to the pangeo-forge recipe)
-    end_dates = [url.split("-")[-1].replace(".nc", "") for url in urls]
+    end_dates = [a[-1] for a in dates]
     urls = [url for _, url in sorted(zip(end_dates, urls))]
+    
+    kwargs = {'recipe_kwargs':recipe_kwargs, 'pattern_kwargs':pattern_kwargs}
+    print(f"Dynamically determined kwargs: {kwargs} for {iid}")
+    return urls, kwargs
 
-    # version is still not working
-    # if facets["version"].startswith("v"):
-    #    facets["version"] = facets["version"][1:]
+def _parse_url_type(url:str) -> str:
+    """Checks that url is of a desired type (currently only http) and removes appended text"""
+    # From naomis code, in case we need to support OPENDAP
+            #         resp = resp["docs"]
+            #         offset += len(resp)
+            #         # print(offset,numFound,len(resp))
+            #         for d in resp:
+            #             dataset_id = d["dataset_id"]
+            #             dataset_size = d["size"]
+            #             for f in d["url"]:
+            #                 sp = f.split("|")
+            #                 if sp[-1] == files_type:
+            #                     url = sp[0]
+            #                     if sp[-1] == "OPENDAP":
+            #                         url = url.replace(".html", "")
+            #                     dataset_url = url
+            #             all_frames += [[dataset_id, dataset_url, dataset_size]]
+    
+    split_url = url.split('|')
+    if not split_url[-1] == 'HTTPServer':
+        raise ValueError('This recipe currently only supports HTTP links')
+    else:
+        return split_url[0]
 
-    # TODO Check that there are no gaps or duplicates.
 
-    return urls
-
-
-## Misc logic
-def facets_from_iid(iid):
+def facets_from_iid(iid:str) -> Dict[str,str]:
+    """Translates iid string to facet dict according to CMIP6 naming scheme"""
     iid_name_template = "mip_era.activity_id.institution_id.source_id.experiment_id.variant_label.table_id.variable_id.grid_label.version"
     facets = {}
     for name, value in zip(iid_name_template.split("."), iid.split(".")):
         facets[name] = value
     return facets
 
-
-## Logic to dynamically generate input kwargs
 def choose_chunksize(
     chunksize_candidates: List[int],
     max_size: float,
@@ -329,63 +271,35 @@ def choose_chunksize(
         raise ValueError("Determined chunksizes are not all equal.")
     else:
         return output_chunksizes[0]
-
-
-def dynamic_kwarg_generation(
-    iid: str,
-) -> Dict[str, Dict[str, int]]:
-    """Dynamically generates keyword arguments `target_chunks` and `subsset_input` for
-    recipe generation based on information available via the ESGF API
-
-    Parameters
-    ----------
-    iid : str
-        ESGF instance_id
-
-    Returns
-    -------
-    Dict[str,Dict[str, int]]
-        Dictionary containing keyword arguments that can be passed to `XarrayZarrRecipe`
-
-    """
-    print(f"====== Generate kwargs for {iid} =======")
-    # TODO, I query the API in multiple places. Need to refactor something robust (which might try different urls?)
-
-    url = "https://esgf-node.llnl.gov/esg-search/search"
-    # url = "https://esgf-data.dkrz.de/esg-search/search"
-
-    # TODO: the 'distrib' parameter does not work as expected for all datasets.
-    # Need to investigate that on the ESGF side.
-    # Could just iterate through nodes for now.
     
-    # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
-    MAX_SUBSET_SIZE=500e6
-    DESIRED_CHUNKSIZE=200e6
+def supports_range_request(url:str) -> bool:
+    """Check if the server allowes range requests"""
+    resp = requests.head(url)
+    
+    if resp.status_code == 308:
+        #permanent redirect
+        redirect_url = resp.headers['Location']
+        return supports_range_request(redirect_url)
+    
+    elif resp.status_code == 200:
+        if not 'accept-ranges' in resp.headers.keys():
+            raise ValueError(f"Did not find `accept-ranges` in HTML header. Got {resp.headers}.")
+        
+        return resp.headers['accept-ranges'] is not None
 
-    params = {
-        "type": "File",
-        "retracted": "false",
-        "replica": "false",
-        "format": "application/solr+json",
-        # "fields": "size",
-        "latest": "true",
-        # "distrib": "true",
-        "limit": 500,
-    }
+def is_netcdf3(url:str) -> bool:
+    """Simple check to determine the netcdf file version behind a url.
+    Requires the server to support range requests"""
+    #TODO: This had some issues. for now deactivate
+    if not supports_range_request(url):
+        print('Server does not support range requests. Default to False')
+        return False
+    else:
+        headers = {"Range": "bytes=0-2"}
+        resp = requests.get(url, headers=headers)
+        return 'CDF' in str(resp.content) 
 
-    facets = facets_from_iid(iid)
-    params.update(facets)
-
-    del params[
-        "version"
-    ]  # TODO: Why do we have to delete this? Need to understand that better
-    resp = requests.get(url=url, params=params)
-
-    file_resp = resp.json()["response"]["docs"]
-
-    if not len(file_resp) > 0:
-        raise ValueError("ESGF API query did not return any files.")
-
+def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str, str]):
     # Check that all responses indeed have the same attributes
     # (error out on e.g. mixed versions for now)
     # TODO: We might allow mixed versions later, but need to be careful with that!
@@ -412,74 +326,16 @@ def dynamic_kwarg_generation(
         if not all(ff == file_facets[0] for ff in file_facets):
             raise ValueError(
                 f"Found non-matching values for {fac} in search query response. Got {file_facets}"
-            )
-
-    # now make sure that the table_id is a key in `preferred_time_divisions` otherwise error
-    table_id = file_resp[0]["table_id"][
-        0
-    ]  # Confirmed before that this list is only 1 element
-    if table_id not in allowed_divisors.keys():
-        raise ValueError(
-            f"Didnt find `table_id` value {table_id} in the `allowed_divisors` dict."
-        )
-
-    filesizes = [f["size"] for f in file_resp]
-
-    # extract date range from filename
-    # TODO: Is there a more robust way to do this?
-    # otherwise maybe use `id` (harder to parse)
-    dates = [a["title"].replace(".nc", "").split("_")[-1].split("-") for a in file_resp]
-
-
-    # infer number of timesteps using pandas
-    def format_date(str_date):
-        return "-".join([str_date[0:4], str_date[4:]])
-
-    # TODO: For non-monthly data, we have to make the freq input smarter
-    timesteps = [
-        len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
-        for a in dates
-    ]
-    print(f'Dates for each file: {dates}')
-    print(f"Size per file in MB: {[f/1e6 for f in filesizes]}")
-    print(f"Inferred timesteps per file: {timesteps}")
-    element_sizes = [size / n_t for size, n_t in zip(filesizes, timesteps)]
-    
-    # TODO: We need a completely new logic branch which checks if the total size (sum(filesizes)) is smaller than a desired chunk
-    target_chunks = {
-        "time": choose_chunksize(
-            allowed_divisors[table_id],
-            DESIRED_CHUNKSIZE,
-            element_sizes,
-            timesteps,
-            include_last=False,
-        )
-    }
-    
-    
-    # dont even try subsetting if none of the files is too large
-    if max(filesizes)<=MAX_SUBSET_SIZE:
-        subset_input = 0
-    else:
-        ## Determine subset_input parameters given the following constraints
-        # - Needs to keep the subset size below MAX_SUBSET_SIZE
-        # - (Not currently implemented) Resulting subsets should be evenly dividable by target_chunks (except for the last file, that can be odd). This might ultimately not be required once we figure out the locking issues. I cannot fulfill this right now with the dataset structure where often the first and last files have different number of timesteps than the 'middle' ones. 
-        
-        smallest_divisor = int(max(filesizes)//MAX_SUBSET_SIZE+1)# need to subset at least with this to stay under required subset size
-        subset_input = smallest_divisor
-        
-
-    dynamic_kwargs = {"target_chunks": target_chunks}
-    if subset_input > 1:
-        dynamic_kwargs["subset_inputs"] = {"time": subset_input}
-    print(f"Dynamically determined kwargs: {dynamic_kwargs} for {iid}")
-    print(
-        f"Will result in max chunksize of {max(element_sizes)*target_chunks['time']/1e6}MB"
-    )
-    return dynamic_kwargs
+            )  
 
 
 ## global variables
+node_dict = {
+    "llnl": "https://esgf-node.llnl.gov/esg-search/search",
+    "ipsl": "https://esgf-node.ipsl.upmc.fr/esg-search/search",
+    "ceda": "https://esgf-index1.ceda.ac.uk/esg-search/search",
+    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
+}
 
 # For certain table_ids it is preferrable to have time chunks that are a multiple of e.g. 1 year for monthly data.
 monthly_divisors = sorted(
@@ -497,21 +353,115 @@ allowed_divisors = {
 
 ## Recipe Generation
 iids = [
-    "CMIP6.CMIP.CCCma.CanESM5.historical.r1i1p1f1.Omon.zos.gn.v20190429",
+    'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r1i1p1f1.Amon.pr.gn.v20190507',
+    # 'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r2i1p1f1.Amon.pr.gn.v20190507',
+    # 'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r3i1p1f1.Amon.pr.gn.v20190508',
+    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r1i1p1f1.Amon.pr.gn.v20200411',
+    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r2i1p1f1.Amon.pr.gn.v20200411',
+    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r3i1p1f1.Amon.pr.gn.v20200411',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p1f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p2f1.Amon.pr.gn.v20190429',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r10i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r1i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r2i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r3i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r4i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r5i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r6i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r7i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r8i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r9i1p1f2.Amon.pr.gr.v20190308',
+    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20201120',
+    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r2i1p1f1.Amon.pr.gn.v20201120',
+    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20201120',
+    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r1i1p1f1.Amon.pr.gn.v20200615',
+    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r2i1p1f1.Amon.pr.gn.v20200615',
+    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r3i1p1f1.Amon.pr.gn.v20200615',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r10i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r1i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r2i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r3i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r4i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r5i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r6i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r7i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r8i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r9i1p1f1.Amon.pr.gr.v20180914',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r10i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r1i1p1f1.Amon.pr.gn.v20190705',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r2i1p1f1.Amon.pr.gn.v20190705',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r3i1p1f1.Amon.pr.gn.v20190705',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r4i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r5i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r6i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r7i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r8i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r9i1p1f1.Amon.pr.gn.v20201228',
+    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r1i1p1f3.Amon.pr.gn.v20190814',
+    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r2i1p1f3.Amon.pr.gn.v20190815',
+    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r3i1p1f3.Amon.pr.gn.v20190814',
+    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r4i1p1f3.Amon.pr.gn.v20190814',
+    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r5i1p1f3.Amon.pr.gn.v20211123',
+    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r1i1p1f1.Amon.pr.gn.v20190320',
+    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r2i1p1f1.Amon.pr.gn.v20200327',
+    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r3i1p1f1.Amon.pr.gn.v20190320',
+    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r4i1p1f1.Amon.pr.gn.v20200327',
+    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r5i1p1f1.Amon.pr.gn.v20190320',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f1.Amon.pr.gn.v20180821',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f2.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p3f1.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f1.Amon.pr.gn.v20180821',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f2.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p3f1.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f1.Amon.pr.gn.v20180822',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f2.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p3f1.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f1.Amon.pr.gn.v20180823',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f2.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p3f1.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f1.Amon.pr.gn.v20180823',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f2.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p3f1.Amon.pr.gn.v20191226',
+    # 'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20200206',
+    # 'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20200305',
+    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r1i1p1f1.Amon.pr.gn.v20190920',
+    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r2i1p1f1.Amon.pr.gn.v20190920',  
+    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r3i1p1f1.Amon.pr.gn.v20190920',
+    'CMIP6.DAMIP.NOAA-GFDL.GFDL-ESM4.hist-aer.r1i1p1f1.Amon.pr.gr1.v20180701',
 ]
-inputs = {iid: dynamic_kwarg_generation(iid) for iid in iids}
 
-
-def recipe_from_urls(urls, instance_kwargs):
-    pattern = pattern_from_file_sequence(urls, "time")
-
-    recipe = XarrayZarrRecipe(
-        pattern, xarray_concat_kwargs={"join": "exact"}, **instance_kwargs
-    )
-    return recipe
-
-
-recipes = {
-    iid: recipe_from_urls(urls_from_instance_id(iid), kwargs)
-    for iid, kwargs in inputs.items()
-}
+recipes = {}
+for iid in iids:
+    urls, kwargs = iid_request(iid, node_dict['llnl'])
+    if urls:
+        recipes[iid] = recipe_from_urls(urls, kwargs)
+    else:
+        print(f"No urls provided for {iid}")
