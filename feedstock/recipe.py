@@ -456,7 +456,7 @@ for ii, iid in enumerate(iids):
     success = False
     print(f"\n+++ Generate Recipe for {iid} ({ii+1}/{len(iids)}) +++")
     for node_name, node_url in node_dict.items():
-        print(f"Node: {node_name}")
+        print(f"Trying Node: {node_name}")
         try:
             urls, kwargs = iid_request(session, netcdf3_session, iid, node_url)
             if urls:
