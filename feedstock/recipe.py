@@ -41,6 +41,10 @@
 
 
 import requests
+from requests.packages.urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError
+
 import pandas as pd
 from typing import List, Dict, Tuple
 from pangeo_forge_recipes.patterns import pattern_from_file_sequence
@@ -57,7 +61,7 @@ def recipe_from_urls(urls, kwargs):
     )
     return recipe
 
-def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
+def iid_request(session:requests.Session, netcdf3_session:requests.Session, iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
     """Takes an instance id and returns urls and kwargs dict based on ESGF API request to the given `node`"""
     params = {
         "type": "File",
@@ -74,7 +78,8 @@ def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
     # searching with version does not work. So what I will do here is delete the version, and later check if the version of the iid is equal to the files found, otherwise error out. TODO
     del params['version']
     
-    resp = requests.get(node, params)
+    print('API request')
+    resp = session.get(node, params=params)
     
     if not resp.status_code == 200:
         raise RuntimeError(f'Request failed with {resp.status_code} for {iid}')
@@ -124,7 +129,7 @@ def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
     element_sizes = [size / n_t for size, n_t in zip(sizes, timesteps)]
     
     ### Determine kwargs
-    print(f"====== Generate kwargs for {iid} =======")
+    print("Generate kwargs")
     # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
     MAX_SUBSET_SIZE=500e6
     DESIRED_CHUNKSIZE=200e6
@@ -159,20 +164,20 @@ def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
         f"Will result in max chunksize of {max(element_sizes)*target_chunks['time']/1e6}MB"
     )
     
-    # Check for netcdf version
-        # Detect if file is netcdf3 or newer
-    print(urls)
+    # Check for netcdf version TODO: This is quite slow, not sure why...
+    # print(urls)
+    print(f"Check for netcdf 3 files")
     pattern_kwargs = {}
-    if any(is_netcdf3(url) for url in urls):
+    if is_netcdf3(netcdf3_session, urls[-1]):
         pattern_kwargs['file_type']="netcdf3"
     
-    
+    print(f"Sort Urls by time")
     # sort urls in decending time order (to be able to pass them directly to the pangeo-forge recipe)
     end_dates = [a[-1] for a in dates]
     urls = [url for _, url in sorted(zip(end_dates, urls))]
     
     kwargs = {'recipe_kwargs':recipe_kwargs, 'pattern_kwargs':pattern_kwargs}
-    print(f"Dynamically determined kwargs: {kwargs} for {iid}")
+    print(f"Dynamically determined kwargs: {kwargs}")
     return urls, kwargs
 
 def _parse_url_type(url:str) -> str:
@@ -271,33 +276,13 @@ def choose_chunksize(
         raise ValueError("Determined chunksizes are not all equal.")
     else:
         return output_chunksizes[0]
-    
-def supports_range_request(url:str) -> bool:
-    """Check if the server allowes range requests"""
-    resp = requests.head(url)
-    
-    if resp.status_code == 308:
-        #permanent redirect
-        redirect_url = resp.headers['Location']
-        return supports_range_request(redirect_url)
-    
-    elif resp.status_code == 200:
-        if not 'accept-ranges' in resp.headers.keys():
-            raise ValueError(f"Did not find `accept-ranges` in HTML header. Got {resp.headers}.")
-        
-        return resp.headers['accept-ranges'] is not None
 
-def is_netcdf3(url:str) -> bool:
+def is_netcdf3(session: requests.Session, url:str) -> bool:
     """Simple check to determine the netcdf file version behind a url.
     Requires the server to support range requests"""
-    #TODO: This had some issues. for now deactivate
-    if not supports_range_request(url):
-        print('Server does not support range requests. Default to False')
-        return False
-    else:
-        headers = {"Range": "bytes=0-2"}
-        resp = requests.get(url, headers=headers)
-        return 'CDF' in str(resp.content) 
+    headers = {"Range": "bytes=0-2"}
+    resp = session.get(url, headers=headers)
+    return 'CDF' in str(resp.content)
 
 def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str, str]):
     # Check that all responses indeed have the same attributes
@@ -330,11 +315,12 @@ def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str
 
 
 ## global variables
+#TODO: Do we need more search nodes?
 node_dict = {
     "llnl": "https://esgf-node.llnl.gov/esg-search/search",
+    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
     "ipsl": "https://esgf-node.ipsl.upmc.fr/esg-search/search",
     "ceda": "https://esgf-index1.ceda.ac.uk/esg-search/search",
-    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
 }
 
 # For certain table_ids it is preferrable to have time chunks that are a multiple of e.g. 1 year for monthly data.
@@ -458,12 +444,30 @@ iids = [
     'CMIP6.DAMIP.NOAA-GFDL.GFDL-ESM4.hist-aer.r1i1p1f1.Amon.pr.gr1.v20180701',
 ]
 
+# set up a requests session to speed up the recipe generation
+# Some tips: https://stackoverflow.com/questions/62599036/python-requests-is-slow-and-takes-very-long-to-complete-http-or-https-request
+session = requests.Session()
+netcdf3_session = requests.Session()
+
+# TODO: The range requests are taking FOREVER. I need to speed those up.
+
 recipes = {}
-for iid in iids:
-    # urls, kwargs = iid_request(iid, node_dict['llnl'])
-    # Try out another node
-    urls, kwargs = iid_request(iid, node_dict['dkrz'])
-    if urls:
-        recipes[iid] = recipe_from_urls(urls, kwargs)
-    else:
-        print(f"No urls provided for {iid}")
+for ii, iid in enumerate(iids):
+    success = False
+    print(f"\n+++ Generate Recipe for {iid} ({ii+1}/{len(iids)}) +++")
+    for node_name, node_url in node_dict.items():
+        print(f"Node: {node_name}")
+        try:
+            urls, kwargs = iid_request(session, netcdf3_session, iid, node_url)
+            if urls:
+                recipes[iid] = recipe_from_urls(urls, kwargs)
+                success = True
+                # if successful break the node loop.
+                break
+            else:
+                print(f"No urls provided for {iid} and Node:{node_name}")
+        except ConnectionError as e: # I cant for the hell of it find out what the exception is...
+            print(e)
+            print(f'It seems that there was a connection issue for {iid} and Node:{node_name}')
+    if not success:
+        print(f'!!!!!!!!!!!!!! Recipe creation failed for {iid}!!!!!!!!!!!!!!!!!\nn')
