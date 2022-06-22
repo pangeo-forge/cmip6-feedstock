@@ -460,7 +460,9 @@ iids = [
 
 recipes = {}
 for iid in iids:
-    urls, kwargs = iid_request(iid, node_dict['llnl'])
+    # urls, kwargs = iid_request(iid, node_dict['llnl'])
+    # Try out another node
+    urls, kwargs = iid_request(iid, node_dict['dkrz'])
     if urls:
         recipes[iid] = recipe_from_urls(urls, kwargs)
     else:
