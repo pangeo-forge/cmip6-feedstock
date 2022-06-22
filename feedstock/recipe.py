@@ -1,50 +1,11 @@
-# Refactored logic
-# Key assumptions: 
-# - We ever only request a single IID. Broader searches are implemented in the parsing module (To be commited)
-# - We start with an instance id, but will actually search for a dataset id with 'latest' query set to true. This means if an outdated iid is requested we will error out (TODO: Need to think about how to handle this)
-
-#TODO: Check multiple nodes with some sort of priority (naomi had done quite a bit with that)
-# node_pref = {
-#     "esgf-data1.llnl.gov": 0,
-#     "esgf-data2.llnl.gov": 0,
-#     "aims3.llnl.gov": 0,
-#     "esgdata.gfdl.noaa.gov": 10,
-#     "esgf-data.ucar.edu": 10,
-#     "dpesgf03.nccs.nasa.gov": 5,
-#     "crd-esgf-drc.ec.gc.ca": 6,
-#     "cmip.bcc.cma.cn": 10,
-#     "cmip.dess.tsinghua.edu.cn": 10,
-#     "cmip.fio.org.cn": 10,
-#     "dist.nmlab.snu.ac.kr": 10,
-#     "esg-cccr.tropmet.res.in": 10,
-#     "esg-dn1.nsc.liu.se": 10,
-#     "esg-dn2.nsc.liu.se": 10,
-#     "esg.camscma.cn": 10,
-#     "esg.lasg.ac.cn": 10,
-#     "esg1.umr-cnrm.fr": 10,
-#     "esgf-cnr.hpc.cineca.it": 10,
-#     "esgf-data2.diasjp.net": 10,
-#     "esgf-data3.ceda.ac.uk": 10,
-#     "esgf-data3.diasjp.net": 10,
-#     "esgf-nimscmip6.apcc21.org": 10,
-#     "esgf-node2.cmcc.it": 10,
-#     "esgf.bsc.es": 10,
-#     "esgf.dwd.de": 10,
-#     "esgf.ichec.ie": 10,
-#     "esgf.nci.org.au": 10,
-#     "esgf.rcec.sinica.edu.tw": 10,
-#     "esgf3.dkrz.de": 10,
-#     "noresg.nird.sigma2.no": 10,
-#     "polaris.pknu.ac.kr": 10,
-#     "vesg.ipsl.upmc.fr": 10,
-# }
-
-
-import requests
 import pandas as pd
 from typing import List, Dict, Tuple
 from pangeo_forge_recipes.patterns import pattern_from_file_sequence
 from pangeo_forge_recipes.recipes import XarrayZarrRecipe
+
+import aiohttp
+import asyncio
+import time
 
 def recipe_from_urls(urls, kwargs):
     # parse kwargs for different steps of the recipe
@@ -57,8 +18,16 @@ def recipe_from_urls(urls, kwargs):
     )
     return recipe
 
-def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
-    """Takes an instance id and returns urls and kwargs dict based on ESGF API request to the given `node`"""
+async def is_netcdf3(session: aiohttp.ClientSession, url:str) -> bool:
+    print(url)
+    """Simple check to determine the netcdf file version behind a url.
+    Requires the server to support range requests"""
+    headers = {"Range": "bytes=0-2"}
+    async with session.get(url, headers=headers) as resp:
+        head = await resp.read()
+        return 'CDF' in str(head)     
+    
+async def iid_request(session: aiohttp.ClientSession, iid:str, nodes:List[str]):
     params = {
         "type": "File",
         "retracted": "false",
@@ -73,107 +42,119 @@ def iid_request(iid:str, node:str) -> Tuple[List, Dict[str, Dict[str, str]]]:
     params.update(facets)
     # searching with version does not work. So what I will do here is delete the version, and later check if the version of the iid is equal to the files found, otherwise error out. TODO
     del params['version']
-    
-    resp = requests.get(node, params)
-    
-    if not resp.status_code == 200:
-        raise RuntimeError(f'Request failed with {resp.status_code} for {iid}')
-        ## TODO: Implement more sophisticated error handling
-    
-    # TODO: Check header?
-    resp_data = resp.json()['response']['docs']
-    
-    if len(resp_data) == 0:
-        raise ValueError(f'No Files were found for {iid}')
-        
-        # Extract info
-    raw_urls,sizes,retracted, table_ids, titles = zip(*[(rd['url'],rd['size'], rd['retracted'], rd['table_id'],rd['title']) for rd in resp_data])
-        
-    # Check consistency with iid input
-    _check_response_facets_consistency(facets, resp_data)
-    # this takes care of checking that all table_ids are the same, so I can do this
-    table_id = table_ids[0][0]
-    
-    #pick http url
-    urls = [_parse_url_type(url[0]) for url in raw_urls]
-    
-    # Check retractions (this seems a bit redundant, but what the heck
-    if not all(r is False for r in retracted):
-        print(retracted)
-        raise ValueError(f"Query for {iid} contains retracted files")
-    
-    
-    # extract date range from filename
-    # TODO: Is there a more robust way to do this?
-    # otherwise maybe use `id` (harder to parse)
-    dates = [t.replace(".nc", "").split("_")[-1].split("-") for t in titles]
+    print('API request')
+    success = False
+    for node in nodes:
+        try:
+            resp = await session.get(node, params=params)
+            status_code = resp.status
+            if not status_code == 200:
+                raise RuntimeError(f'Request failed with {status_code} for {iid}')
+            resp_data = await resp.json(content_type='text/json')#https://stackoverflow.com/questions/48840378/python-attempt-to-decode-json-with-unexpected-mimetype
+            resp_data = resp_data['response']['docs']
+            if len(resp_data) == 0:
+                raise ValueError(f'No Files were found for {iid}')
+
+            # Extract info
+            raw_urls,sizes,retracted, table_ids, titles = zip(*[(rd['url'],rd['size'], rd['retracted'], rd['table_id'],rd['title']) for rd in resp_data])
+
+            # Check consistency with iid input
+            _check_response_facets_consistency(facets, resp_data)
+            # this takes care of checking that all table_ids are the same, so I can do this
+            table_id = table_ids[0][0]
+
+            #pick http url
+            urls = [_parse_url_type(url[0]) for url in raw_urls]
+
+            # Check retractions (this seems a bit redundant, but what the heck
+            if not all(r is False for r in retracted):
+                print(retracted)
+                raise ValueError(f"Query for {iid} contains retracted files")
 
 
-    # infer number of timesteps using pandas
-    def format_date(str_date):
-        return "-".join([str_date[0:4], str_date[4:]])
+            # extract date range from filename
+            # TODO: Is there a more robust way to do this?
+            # otherwise maybe use `id` (harder to parse)
+            dates = [t.replace(".nc", "").split("_")[-1].split("-") for t in titles]
 
-    # TODO: For non-monthly data, we have to make the freq input smarter
-    timesteps = [
-        len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
-        for a in dates
-    ]
-    print(f'Dates for each file: {dates}')
-    print(f"Size per file in MB: {[f/1e6 for f in sizes]}")
-    print(f"Inferred timesteps per file: {timesteps}")
-    element_sizes = [size / n_t for size, n_t in zip(sizes, timesteps)]
-    
-    ### Determine kwargs
-    print(f"====== Generate kwargs for {iid} =======")
-    # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
-    MAX_SUBSET_SIZE=500e6
-    DESIRED_CHUNKSIZE=200e6
-    # TODO: We need a completely new logic branch which checks if the total size (sum(filesizes)) is smaller than a desired chunk
-    target_chunks = {
-        "time": choose_chunksize(
-            allowed_divisors[table_id],
-            DESIRED_CHUNKSIZE,
-            element_sizes,
-            timesteps,
-            include_last=False,
-        )
-    }
-    
-    
-    # dont even try subsetting if none of the files is too large
-    if max(sizes)<=MAX_SUBSET_SIZE:
-        subset_input = 0
+
+            # infer number of timesteps using pandas
+            def format_date(str_date):
+                return "-".join([str_date[0:4], str_date[4:]])
+
+            # TODO: For non-monthly data, we have to make the freq input smarter
+            timesteps = [
+                len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
+                for a in dates
+            ]
+            print(f'Dates for each file: {dates}')
+            print(f"Size per file in MB: {[f/1e6 for f in sizes]}")
+            print(f"Inferred timesteps per file: {timesteps}")
+            element_sizes = [size / n_t for size, n_t in zip(sizes, timesteps)]
+
+            ### Determine kwargs
+            print("Generate kwargs")
+            # MAX_SUBSET_SIZE=1e9 # This is an option if the revised subsetting still runs into errors.
+            MAX_SUBSET_SIZE=500e6
+            DESIRED_CHUNKSIZE=200e6
+            # TODO: We need a completely new logic branch which checks if the total size (sum(filesizes)) is smaller than a desired chunk
+            target_chunks = {
+                "time": choose_chunksize(
+                    allowed_divisors[table_id],
+                    DESIRED_CHUNKSIZE,
+                    element_sizes,
+                    timesteps,
+                    include_last=False,
+                )
+            }
+
+
+            # dont even try subsetting if none of the files is too large
+            if max(sizes)<=MAX_SUBSET_SIZE:
+                subset_input = 0
+            else:
+                ## Determine subset_input parameters given the following constraints
+                # - Needs to keep the subset size below MAX_SUBSET_SIZE
+                # - (Not currently implemented) Resulting subsets should be evenly dividable by target_chunks (except for the last file, that can be odd). This might ultimately not be required once we figure out the locking issues. I cannot fulfill this right now with the dataset structure where often the first and last files have different number of timesteps than the 'middle' ones. 
+
+                smallest_divisor = int(max(sizes)//MAX_SUBSET_SIZE+1)# need to subset at least with this to stay under required subset size
+                subset_input = smallest_divisor
+
+            recipe_kwargs = {"target_chunks": target_chunks}
+            if subset_input > 1:
+                recipe_kwargs["subset_inputs"] = {"time": subset_input}
+
+            print(
+                f"Will result in max chunksize of {max(element_sizes)*target_chunks['time']/1e6}MB"
+            )
+
+            # Check for netcdf version TODO: This is quite slow, not sure why...
+            # print(urls)
+            print(f"Check for netcdf 3 files")
+            pattern_kwargs = {}
+            netcdf3_check = await is_netcdf3(session, urls[-1])
+            # netcdf3_check = is_netcdf3(urls[-1]) #TODO This works, but this is the part that is slow as hell, so I should async this one...
+            if netcdf3_check:
+                pattern_kwargs['file_type']="netcdf3"
+
+            print(f"Sort Urls by time")
+            # sort urls in decending time order (to be able to pass them directly to the pangeo-forge recipe)
+            end_dates = [a[-1] for a in dates]
+            urls = [url for _, url in sorted(zip(end_dates, urls))]
+
+            kwargs = {'recipe_kwargs':recipe_kwargs, 'pattern_kwargs':pattern_kwargs}
+            print(f"Dynamically determined kwargs: {kwargs}")
+            success = True
+            break
+        except Exception as e:
+            print(f"Request for Node:{node} and iid:{iid} failed due to {e}")
+                      
+    if success:
+        return urls, kwargs
     else:
-        ## Determine subset_input parameters given the following constraints
-        # - Needs to keep the subset size below MAX_SUBSET_SIZE
-        # - (Not currently implemented) Resulting subsets should be evenly dividable by target_chunks (except for the last file, that can be odd). This might ultimately not be required once we figure out the locking issues. I cannot fulfill this right now with the dataset structure where often the first and last files have different number of timesteps than the 'middle' ones. 
+        return None, None
         
-        smallest_divisor = int(max(sizes)//MAX_SUBSET_SIZE+1)# need to subset at least with this to stay under required subset size
-        subset_input = smallest_divisor
-    
-    recipe_kwargs = {"target_chunks": target_chunks}
-    if subset_input > 1:
-        recipe_kwargs["subset_inputs"] = {"time": subset_input}
-    
-    print(
-        f"Will result in max chunksize of {max(element_sizes)*target_chunks['time']/1e6}MB"
-    )
-    
-    # Check for netcdf version
-        # Detect if file is netcdf3 or newer
-    print(urls)
-    pattern_kwargs = {}
-    if any(is_netcdf3(url) for url in urls):
-        pattern_kwargs['file_type']="netcdf3"
-    
-    
-    # sort urls in decending time order (to be able to pass them directly to the pangeo-forge recipe)
-    end_dates = [a[-1] for a in dates]
-    urls = [url for _, url in sorted(zip(end_dates, urls))]
-    
-    kwargs = {'recipe_kwargs':recipe_kwargs, 'pattern_kwargs':pattern_kwargs}
-    print(f"Dynamically determined kwargs: {kwargs} for {iid}")
-    return urls, kwargs
+            
 
 def _parse_url_type(url:str) -> str:
     """Checks that url is of a desired type (currently only http) and removes appended text"""
@@ -271,33 +252,8 @@ def choose_chunksize(
         raise ValueError("Determined chunksizes are not all equal.")
     else:
         return output_chunksizes[0]
-    
-def supports_range_request(url:str) -> bool:
-    """Check if the server allowes range requests"""
-    resp = requests.head(url)
-    
-    if resp.status_code == 308:
-        #permanent redirect
-        redirect_url = resp.headers['Location']
-        return supports_range_request(redirect_url)
-    
-    elif resp.status_code == 200:
-        if not 'accept-ranges' in resp.headers.keys():
-            raise ValueError(f"Did not find `accept-ranges` in HTML header. Got {resp.headers}.")
-        
-        return resp.headers['accept-ranges'] is not None
 
-def is_netcdf3(url:str) -> bool:
-    """Simple check to determine the netcdf file version behind a url.
-    Requires the server to support range requests"""
-    #TODO: This had some issues. for now deactivate
-    if not supports_range_request(url):
-        print('Server does not support range requests. Default to False')
-        return False
-    else:
-        headers = {"Range": "bytes=0-2"}
-        resp = requests.get(url, headers=headers)
-        return 'CDF' in str(resp.content) 
+
 
 def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str, str]):
     # Check that all responses indeed have the same attributes
@@ -330,11 +286,12 @@ def _check_response_facets_consistency(facets:Dict[str, str], file_resp:Dict[str
 
 
 ## global variables
+#TODO: Do we need more search nodes?
 node_dict = {
     "llnl": "https://esgf-node.llnl.gov/esg-search/search",
+    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
     "ipsl": "https://esgf-node.ipsl.upmc.fr/esg-search/search",
     "ceda": "https://esgf-index1.ceda.ac.uk/esg-search/search",
-    "dkrz": "https://esgf-data.dkrz.de/esg-search/search",
 }
 
 # For certain table_ids it is preferrable to have time chunks that are a multiple of e.g. 1 year for monthly data.
@@ -354,114 +311,123 @@ allowed_divisors = {
 ## Recipe Generation
 iids = [
     'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r1i1p1f1.Amon.pr.gn.v20190507',
-    # 'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r2i1p1f1.Amon.pr.gn.v20190507',
-    # 'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r3i1p1f1.Amon.pr.gn.v20190508',
-    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r1i1p1f1.Amon.pr.gn.v20200411',
-    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r2i1p1f1.Amon.pr.gn.v20200411',
-    # 'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r3i1p1f1.Amon.pr.gn.v20200411',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p1f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p2f1.Amon.pr.gn.v20190429',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r10i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r1i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r2i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r3i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r4i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r5i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r6i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r7i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r8i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r9i1p1f2.Amon.pr.gr.v20190308',
-    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20201120',
-    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r2i1p1f1.Amon.pr.gn.v20201120',
-    # 'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20201120',
-    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r1i1p1f1.Amon.pr.gn.v20200615',
-    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r2i1p1f1.Amon.pr.gn.v20200615',
-    # 'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r3i1p1f1.Amon.pr.gn.v20200615',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r10i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r1i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r2i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r3i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r4i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r5i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r6i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r7i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r8i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r9i1p1f1.Amon.pr.gr.v20180914',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r10i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r1i1p1f1.Amon.pr.gn.v20190705',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r2i1p1f1.Amon.pr.gn.v20190705',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r3i1p1f1.Amon.pr.gn.v20190705',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r4i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r5i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r6i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r7i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r8i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r9i1p1f1.Amon.pr.gn.v20201228',
-    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r1i1p1f3.Amon.pr.gn.v20190814',
-    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r2i1p1f3.Amon.pr.gn.v20190815',
-    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r3i1p1f3.Amon.pr.gn.v20190814',
-    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r4i1p1f3.Amon.pr.gn.v20190814',
-    # 'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r5i1p1f3.Amon.pr.gn.v20211123',
-    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r1i1p1f1.Amon.pr.gn.v20190320',
-    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r2i1p1f1.Amon.pr.gn.v20200327',
-    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r3i1p1f1.Amon.pr.gn.v20190320',
-    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r4i1p1f1.Amon.pr.gn.v20200327',
-    # 'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r5i1p1f1.Amon.pr.gn.v20190320',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f1.Amon.pr.gn.v20180821',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f2.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p3f1.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f1.Amon.pr.gn.v20180821',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f2.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p3f1.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f1.Amon.pr.gn.v20180822',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f2.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p3f1.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f1.Amon.pr.gn.v20180823',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f2.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p3f1.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f1.Amon.pr.gn.v20180823',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f2.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p3f1.Amon.pr.gn.v20191226',
-    # 'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20200206',
-    # 'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20200305',
-    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r1i1p1f1.Amon.pr.gn.v20190920',
-    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r2i1p1f1.Amon.pr.gn.v20190920',  
-    # 'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r3i1p1f1.Amon.pr.gn.v20190920',
+    'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r2i1p1f1.Amon.pr.gn.v20190507',
+    'CMIP6.DAMIP.BCC.BCC-CSM2-MR.hist-aer.r3i1p1f1.Amon.pr.gn.v20190508',
+    'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r1i1p1f1.Amon.pr.gn.v20200411',
+    'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r2i1p1f1.Amon.pr.gn.v20200411',
+    'CMIP6.DAMIP.CAS.FGOALS-g3.hist-aer.r3i1p1f1.Amon.pr.gn.v20200411',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r10i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r11i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r12i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r13i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r14i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r15i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r1i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r2i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r3i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r4i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r5i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r6i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r7i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r8i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p1f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CCCma.CanESM5.hist-aer.r9i1p2f1.Amon.pr.gn.v20190429',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r10i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r1i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r2i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r3i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r4i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r5i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r6i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r7i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r8i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CNRM-CERFACS.CNRM-CM6-1.hist-aer.r9i1p1f2.Amon.pr.gr.v20190308',
+    'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20201120',
+    'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r2i1p1f1.Amon.pr.gn.v20201120',
+    'CMIP6.DAMIP.CSIRO-ARCCSS.ACCESS-CM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20201120',
+    'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r1i1p1f1.Amon.pr.gn.v20200615',
+    'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r2i1p1f1.Amon.pr.gn.v20200615',
+    'CMIP6.DAMIP.CSIRO.ACCESS-ESM1-5.hist-aer.r3i1p1f1.Amon.pr.gn.v20200615',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r10i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r1i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r2i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r3i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r4i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r5i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r6i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r7i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r8i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.IPSL.IPSL-CM6A-LR.hist-aer.r9i1p1f1.Amon.pr.gr.v20180914',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r10i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r1i1p1f1.Amon.pr.gn.v20190705',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r2i1p1f1.Amon.pr.gn.v20190705',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r3i1p1f1.Amon.pr.gn.v20190705',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r4i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r5i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r6i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r7i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r8i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MIROC.MIROC6.hist-aer.r9i1p1f1.Amon.pr.gn.v20201228',
+    'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r1i1p1f3.Amon.pr.gn.v20190814',
+    'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r2i1p1f3.Amon.pr.gn.v20190815',
+    'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r3i1p1f3.Amon.pr.gn.v20190814',
+    'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r4i1p1f3.Amon.pr.gn.v20190814',
+    'CMIP6.DAMIP.MOHC.HadGEM3-GC31-LL.hist-aer.r5i1p1f3.Amon.pr.gn.v20211123',
+    'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r1i1p1f1.Amon.pr.gn.v20190320',
+    'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r2i1p1f1.Amon.pr.gn.v20200327',
+    'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r3i1p1f1.Amon.pr.gn.v20190320',
+    'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r4i1p1f1.Amon.pr.gn.v20200327',
+    'CMIP6.DAMIP.MRI.MRI-ESM2-0.hist-aer.r5i1p1f1.Amon.pr.gn.v20190320',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f1.Amon.pr.gn.v20180821',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p1f2.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r1i1p3f1.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f1.Amon.pr.gn.v20180821',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p1f2.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r2i1p3f1.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f1.Amon.pr.gn.v20180822',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p1f2.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r3i1p3f1.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f1.Amon.pr.gn.v20180823',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p1f2.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r4i1p3f1.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f1.Amon.pr.gn.v20180823',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p1f2.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NASA-GISS.GISS-E2-1-G.hist-aer.r5i1p3f1.Amon.pr.gn.v20191226',
+    'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r1i1p1f1.Amon.pr.gn.v20200206',
+    'CMIP6.DAMIP.NCAR.CESM2.hist-aer.r3i1p1f1.Amon.pr.gn.v20200305',
+    'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r1i1p1f1.Amon.pr.gn.v20190920',
+    'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r2i1p1f1.Amon.pr.gn.v20190920',  
+    'CMIP6.DAMIP.NCC.NorESM2-LM.hist-aer.r3i1p1f1.Amon.pr.gn.v20190920',
     'CMIP6.DAMIP.NOAA-GFDL.GFDL-ESM4.hist-aer.r1i1p1f1.Amon.pr.gr1.v20180701',
 ]
 
-recipes = {}
-for iid in iids:
-    urls, kwargs = iid_request(iid, node_dict['llnl'])
-    if urls:
-        recipes[iid] = recipe_from_urls(urls, kwargs)
-    else:
-        print(f"No urls provided for {iid}")
+node = node_dict['llnl']
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+
+        tasks = []
+        for iid in iids:
+            tasks.append(asyncio.ensure_future(iid_request(session, iid, node_dict.values())))
+
+        raw_input = await asyncio.gather(*tasks)
+        recipe = {iid:recipe_from_urls(urls, kwargs) for iid, (urls, kwargs) in zip(iids, raw_input) if urls is not None}
+        return recipe
+
+# If you want to debug this in a jupyter notebook you need to uncomment the code below and instead import main and then do `await main()` (see 
+recipes = asyncio.run(main())
+#Final TODO: How do I incorporate this into pangeo forge?
