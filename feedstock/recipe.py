@@ -457,7 +457,7 @@ iids = [
     "CMIP6.DAMIP.NOAA-GFDL.GFDL-ESM4.hist-aer.r1i1p1f1.Amon.pr.gr1.v20180701",
 ]
 iids = [
-    "CMIP6.PMIP.MPI-M.MPI-ESM1-2-LR.past2k.r1i1p1f1.Amon.tas.gn"
+    "CMIP6.PMIP.MPI-M.MPI-ESM1-2-LR.past2k.r1i1p1f1.Amon.tas.gn.dummy"
 ]
 
 # TODO: should implement a retry + backoff (i have seen flaky datasets come back after a few minutes.
