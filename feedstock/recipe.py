@@ -1,4 +1,3 @@
-import pandas as pd
 from typing import List, Dict, Tuple
 from pangeo_forge_recipes.patterns import pattern_from_file_sequence
 from pangeo_forge_recipes.recipes import XarrayZarrRecipe
@@ -70,7 +69,13 @@ async def _esgf_api_request(
     if len(resp_data) == 0:
         raise ValueError(f"No Files were found for {iid}")
     return resp_data
-
+    
+def get_timesteps_simple(dates, table_id):
+    assert 'mon' in table_id # this needs some more careful treatment for other timefrequencies. 
+    timesteps = [(int(d[1][0:4]) - int(d[0][0:4])) *12 + (int(d[1][4:6]) - int(d[0][4:6]) + 1) for d in dates]
+    
+    return timesteps
+    
 
 async def response_data_processing(
     session: aiohttp.ClientSession,
@@ -108,21 +113,14 @@ async def response_data_processing(
     if not all(r is False for r in retracted):
         print("retracted", retracted)
         raise ValueError(f"Query for {iid} contains retracted files")
-
+        
     # extract date range from filename
     # TODO: Is there a more robust way to do this?
     # otherwise maybe use `id` (harder to parse)
     dates = [t.replace(".nc", "").split("_")[-1].split("-") for t in titles]
 
-    # infer number of timesteps using pandas
-    def format_date(str_date):
-        return "-".join([str_date[0:4], str_date[4:]])
-
-    # TODO: For non-monthly data, we have to make the freq input smarter
-    timesteps = [
-        len(pd.date_range(format_date(a[0]), format_date(a[1]), freq="1MS"))
-        for a in dates
-    ]
+    timesteps = get_timesteps_simple(dates, table_id)
+    
     print(f"Dates for each file: {dates}")
     print(f"Size per file in MB: {[f/1e6 for f in sizes]}")
     print(f"Inferred timesteps per file: {timesteps}")
