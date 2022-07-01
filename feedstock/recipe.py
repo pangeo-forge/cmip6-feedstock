@@ -456,6 +456,13 @@ iids = [
 ]
 # TODO: should implement a retry + backoff (i have seen flaky datasets come back after a few minutes.
 
+# just for testing the PMIP data overwrite the list
+iids = [
+    "CMIP6.PMIP.MPI-M.MPI-ESM1-2-LR.past2k.r1i1p1f1.Amon.tas.gn.dummy"
+    "CMIP6.PMIP.MRI.MRI-ESM2-0.past1000.r1i1p1f1.Amon.tas.gn.dummy",
+    "CMIP6.PMIP.MIROC.MIROC-ES2L.past1000.r1i1p1f2.Amon.tas.gn.dummy",
+]
+
 # Lets try to implement retrys
 async def main(node_list):
     # Lets limit the amount of connections to avoid being flagged
