@@ -43,7 +43,7 @@ def _build_params(iid: str) -> Dict[str, str]:
         # "fields": ["url", "size", "retracted", "table_id", "title","instance_id"], # TODO: why does this not work? Ill revisit when I am tuning performance, for now get all
         "latest": "true",
         "distrib": "true",
-        # "limit": 500, # TODO: Should this be less?
+        "limit": 500, #
     }
     facets = facets_from_iid(iid)
     params.update(facets)
