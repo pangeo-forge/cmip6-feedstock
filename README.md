@@ -8,6 +8,7 @@ Ideally a request for new datasets includes a list of [instance_ids]() that can 
 
 ## Split feedstocks
 [CMIP6-PMIP](https://github.com/pangeo-forge/CMIP6-PMIP-feedstock)
+[CMIP6-DAMIP](https://github.com/pangeo-forge/CMIP6-DAMIP-feedstock)
 
 
 Please refer to https://pangeo-forge.org/dashboard/feedstock/7 to follow this feedstock's journey within Pangeo Forge Cloud.
