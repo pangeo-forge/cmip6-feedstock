@@ -1,3 +1,7 @@
+# 🚨🚨🚨Deprecation Notice🚨🚨🚨
+This feedstock is no longer maintained. All further efforts of the [Pangeo / ESGF Cloud Data Working Group](https://pangeo-data.github.io/pangeo-cmip6-cloud/) to ingest CMIP6 data into Analysis-Ready Cloud-Optimized zarr stores are consolidated [here](https://github.com/leap-stc/cmip6-leap-feedstock).
+
+
 # cmip6-feedstock
 
 **This feedstock will not actually contain recipes anymore, and only be used for all requests to add CMIP data to the cloud that is not currently available in the [Pangeo CMIP6 Cloud holdings](https://pangeo-data.github.io/pangeo-cmip6-cloud/).**
